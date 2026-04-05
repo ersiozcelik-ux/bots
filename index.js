@@ -11,6 +11,20 @@ const supabase = createClient(
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// ── Key generator ──
+function generateKey() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const parts = [];
+  for (let i = 0; i < 4; i++) {
+    let seg = "";
+    for (let j = 0; j < 5; j++) {
+      seg += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    parts.push(seg);
+  }
+  return parts.join("-");
+}
+
 // ── Register slash commands on startup ──
 client.once('ready', async () => {
   console.log(`✅ Bot online as ${client.user.tag}`);
@@ -21,6 +35,9 @@ client.once('ready', async () => {
       .addUserOption(o => o.setName('user').setDescription('User to ban').setRequired(true)),
     new SlashCommandBuilder().setName('unban').setDescription('Unban a user')
       .addUserOption(o => o.setName('user').setDescription('User to unban').setRequired(true)),
+    new SlashCommandBuilder().setName('whitelist').setDescription('Whitelist a user with a timed key')
+      .addUserOption(o => o.setName('user').setDescription('User to whitelist').setRequired(true))
+      .addStringOption(o => o.setName('time').setDescription('Duration (e.g. 1h, 6h, 12h, 1d, 7d, 30d)').setRequired(true)),
   ];
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
@@ -36,17 +53,28 @@ client.once('ready', async () => {
   }
 });
 
+// ── Parse duration string to milliseconds ──
+function parseDuration(str) {
+  const match = str.match(/^(\d+)\s*(m|h|d)$/i);
+  if (!match) return null;
+  const num = parseInt(match[1]);
+  const unit = match[2].toLowerCase();
+  if (unit === 'm') return num * 60 * 1000;
+  if (unit === 'h') return num * 3600 * 1000;
+  if (unit === 'd') return num * 86400 * 1000;
+  return null;
+}
+
 // ── Interaction handler ──
 client.on('interactionCreate', async interaction => {
   try {
-    // Slash commands
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === 'panel') return handlePanel(interaction);
       if (interaction.commandName === 'ban') return handleBan(interaction);
       if (interaction.commandName === 'unban') return handleUnban(interaction);
+      if (interaction.commandName === 'whitelist') return handleWhitelist(interaction);
     }
 
-    // Button clicks
     if (interaction.isButton()) {
       const id = interaction.customId;
       if (id === 'redeem_key') return showRedeemModal(interaction);
@@ -56,7 +84,6 @@ client.on('interactionCreate', async interaction => {
       if (id === 'get_stats') return handleGetStats(interaction);
     }
 
-    // Modal submit
     if (interaction.type === InteractionType.ModalSubmit) {
       if (interaction.customId === 'modal_redeem_key') return handleModalRedeem(interaction);
     }
@@ -81,6 +108,49 @@ async function handlePanel(interaction) {
     new ButtonBuilder().setCustomId('get_stats').setLabel('Get Stats').setEmoji('📊').setStyle(ButtonStyle.Secondary),
   );
   await interaction.reply({ content: '**⚔ CeraHub Control Panel**\n\nClick the buttons below to manage your key.', components: [row] });
+}
+
+// ── Whitelist ──
+async function handleWhitelist(interaction) {
+  if (!interaction.member.roles.cache.has(ADMIN_ROLE_ID))
+    return interaction.reply({ content: '❌ No permission.', ephemeral: true });
+
+  const target = interaction.options.getUser('user');
+  const timeStr = interaction.options.getString('time');
+  const durationMs = parseDuration(timeStr);
+
+  if (!durationMs) {
+    return interaction.reply({ content: '❌ Invalid time format. Use e.g. `1h`, `6h`, `12h`, `1d`, `7d`, `30d`.', ephemeral: true });
+  }
+
+  const newKey = generateKey();
+  const expiresAt = new Date(Date.now() + durationMs);
+
+  const { error } = await supabase.from('keys').insert({
+    key: newKey,
+    discord_user_id: target.id,
+    expires_at: expiresAt.toISOString(),
+    lootlabs_completed: true, // whitelisted keys are pre-activated
+    is_active: true,
+  });
+
+  if (error) {
+    console.error('Whitelist insert error:', error);
+    return interaction.reply({ content: '❌ Failed to create key.', ephemeral: true });
+  }
+
+  // Try to DM the user
+  const expiry = `<t:${Math.floor(expiresAt.getTime() / 1000)}:R>`;
+  const scriptUrl = `https://ciybdtgrarvjkpphuqbn.supabase.co/functions/v1/cl`;
+  const dmContent = `🎉 **You've been whitelisted on CeraHub!**\n\n🔑 **Key:** \`${newKey}\`\n⏰ **Expires:** ${expiry}\n\n📜 **Script:**\n\`\`\`lua\nscript_key="${newKey}";\nloadstring(game:HttpGet("${scriptUrl}"))()\n\`\`\``;
+
+  try {
+    await target.send(dmContent);
+    await interaction.reply({ content: `✅ Key created and sent to <@${target.id}> via DM.\n\n🔑 Key: \`${newKey}\`\n⏰ Expires: ${expiry}`, ephemeral: true });
+  } catch {
+    // DMs might be disabled
+    await interaction.reply({ content: `✅ Key created but couldn't DM <@${target.id}> (DMs disabled?).\n\n🔑 Key: \`${newKey}\`\n⏰ Expires: ${expiry}`, ephemeral: true });
+  }
 }
 
 // ── Redeem Key Modal ──
