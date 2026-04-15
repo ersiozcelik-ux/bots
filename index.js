@@ -11,7 +11,6 @@ const supabase = createClient(
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// ── Key generator ──
 function generateKey() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   const parts = [];
@@ -25,12 +24,24 @@ function generateKey() {
   return parts.join("-");
 }
 
+function parseDuration(str) {
+  const match = str.match(/^(\d+)\s*(m|h|d)$/i);
+  if (!match) return null;
+  const num = parseInt(match[1]);
+  const unit = match[2].toLowerCase();
+  if (unit === 'm') return num * 60 * 1000;
+  if (unit === 'h') return num * 3600 * 1000;
+  if (unit === 'd') return num * 86400 * 1000;
+  return null;
+}
+
 // ── Register slash commands on startup ──
 client.once('ready', async () => {
   console.log(`✅ Bot online as ${client.user.tag}`);
 
   const commands = [
     new SlashCommandBuilder().setName('panel').setDescription('Open CeraHub Control Panel'),
+    new SlashCommandBuilder().setName('privatpanel').setDescription('Open CeraHub Private Control Panel'),
     new SlashCommandBuilder().setName('ban').setDescription('Ban a user')
       .addUserOption(o => o.setName('user').setDescription('User to ban').setRequired(true)),
     new SlashCommandBuilder().setName('unban').setDescription('Unban a user')
@@ -38,6 +49,13 @@ client.once('ready', async () => {
     new SlashCommandBuilder().setName('whitelist').setDescription('Whitelist a user with a timed key')
       .addUserOption(o => o.setName('user').setDescription('User to whitelist').setRequired(true))
       .addStringOption(o => o.setName('time').setDescription('Duration (e.g. 1h, 6h, 12h, 1d, 7d, 30d)').setRequired(true)),
+    new SlashCommandBuilder().setName('whitelistprivat').setDescription('Whitelist a user for private script')
+      .addUserOption(o => o.setName('user').setDescription('User to whitelist').setRequired(true))
+      .addStringOption(o => o.setName('time').setDescription('Duration (e.g. 1h, 6h, 12h, 1d, 7d, 30d)').setRequired(true)),
+    new SlashCommandBuilder().setName('unwhitelist').setDescription('Remove whitelist (delete key) from a user')
+      .addUserOption(o => o.setName('user').setDescription('User to unwhitelist').setRequired(true))
+      .addStringOption(o => o.setName('type').setDescription('Key type: standard or private').setRequired(true)
+        .addChoices({ name: 'Standard', value: 'standard' }, { name: 'Private', value: 'private' })),
   ];
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
@@ -53,35 +71,30 @@ client.once('ready', async () => {
   }
 });
 
-// ── Parse duration string to milliseconds ──
-function parseDuration(str) {
-  const match = str.match(/^(\d+)\s*(m|h|d)$/i);
-  if (!match) return null;
-  const num = parseInt(match[1]);
-  const unit = match[2].toLowerCase();
-  if (unit === 'm') return num * 60 * 1000;
-  if (unit === 'h') return num * 3600 * 1000;
-  if (unit === 'd') return num * 86400 * 1000;
-  return null;
-}
-
 // ── Interaction handler ──
 client.on('interactionCreate', async interaction => {
   try {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === 'panel') return handlePanel(interaction);
+      if (interaction.commandName === 'privatpanel') return handlePrivatPanel(interaction);
       if (interaction.commandName === 'ban') return handleBan(interaction);
       if (interaction.commandName === 'unban') return handleUnban(interaction);
-      if (interaction.commandName === 'whitelist') return handleWhitelist(interaction);
+      if (interaction.commandName === 'whitelist') return handleWhitelist(interaction, 'standard');
+      if (interaction.commandName === 'whitelistprivat') return handleWhitelist(interaction, 'private');
+      if (interaction.commandName === 'unwhitelist') return handleUnwhitelist(interaction);
     }
 
     if (interaction.isButton()) {
       const id = interaction.customId;
       if (id === 'redeem_key') return showRedeemModal(interaction);
-      if (id === 'get_script') return handleGetScript(interaction);
+      if (id === 'get_script') return handleGetScript(interaction, 'standard');
       if (id === 'get_role') return handleGetRole(interaction);
-      if (id === 'reset_hwid') return handleResetHwid(interaction);
-      if (id === 'get_stats') return handleGetStats(interaction);
+      if (id === 'reset_hwid') return handleResetHwid(interaction, 'standard');
+      if (id === 'get_stats') return handleGetStats(interaction, 'standard');
+      // Private panel buttons
+      if (id === 'get_script_private') return handleGetScript(interaction, 'private');
+      if (id === 'reset_hwid_private') return handleResetHwid(interaction, 'private');
+      if (id === 'get_stats_private') return handleGetStats(interaction, 'private');
     }
 
     if (interaction.type === InteractionType.ModalSubmit) {
@@ -98,7 +111,7 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ── Panel ──
+// ── Standard Panel ──
 async function handlePanel(interaction) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('redeem_key').setLabel('Redeem Key').setEmoji('🔑').setStyle(ButtonStyle.Success),
@@ -110,8 +123,18 @@ async function handlePanel(interaction) {
   await interaction.reply({ content: '**⚔ CeraHub Control Panel**\n\nClick the buttons below to manage your key.', components: [row] });
 }
 
-// ── Whitelist ──
-async function handleWhitelist(interaction) {
+// ── Private Panel ──
+async function handlePrivatPanel(interaction) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('get_script_private').setLabel('Get Script').setEmoji('📜').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('reset_hwid_private').setLabel('Reset HWID').setEmoji('⚙').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('get_stats_private').setLabel('Get Stats').setEmoji('📊').setStyle(ButtonStyle.Secondary),
+  );
+  await interaction.reply({ content: '**🔒 CeraHub Private Panel**\n\nOnly whitelisted users can use this panel.', components: [row] });
+}
+
+// ── Whitelist (supports both standard and private) ──
+async function handleWhitelist(interaction, keyType) {
   if (!interaction.member.roles.cache.has(ADMIN_ROLE_ID))
     return interaction.reply({ content: '❌ No permission.', ephemeral: true });
 
@@ -130,8 +153,9 @@ async function handleWhitelist(interaction) {
     key: newKey,
     discord_user_id: target.id,
     expires_at: expiresAt.toISOString(),
-    lootlabs_completed: true, // whitelisted keys are pre-activated
+    lootlabs_completed: true,
     is_active: true,
+    key_type: keyType,
   });
 
   if (error) {
@@ -139,21 +163,44 @@ async function handleWhitelist(interaction) {
     return interaction.reply({ content: '❌ Failed to create key.', ephemeral: true });
   }
 
-  // Try to DM the user
   const expiry = `<t:${Math.floor(expiresAt.getTime() / 1000)}:R>`;
-  const scriptUrl = `https://ciybdtgrarvjkpphuqbn.supabase.co/functions/v1/cl`;
-  const dmContent = `🎉 **You've been whitelisted on CeraHub!**\n\n🔑 **Key:** \`${newKey}\`\n⏰ **Expires:** ${expiry}\n\n📜 **Script:**\n\`\`\`lua\nscript_key="${newKey}";\nloadstring(game:HttpGet("${scriptUrl}"))()\n\`\`\``;
+  const label = keyType === 'private' ? 'Private' : 'Standard';
+  const scriptFn = keyType === 'private' ? 'cl-private' : 'cl';
+  const scriptUrl = `https://ciybdtgrarvjkpphuqbn.supabase.co/functions/v1/${scriptFn}`;
+  const dmContent = `🎉 **You've been whitelisted on CeraHub (${label})!**\n\n🔑 **Key:** \`${newKey}\`\n⏰ **Expires:** ${expiry}\n\n📜 **Script:**\n\`\`\`lua\nscript_key="${newKey}";\nloadstring(game:HttpGet("${scriptUrl}"))()\n\`\`\``;
 
   try {
     await target.send(dmContent);
-    await interaction.reply({ content: `✅ Key created and sent to <@${target.id}> via DM.\n\n🔑 Key: \`${newKey}\`\n⏰ Expires: ${expiry}`, ephemeral: true });
+    await interaction.reply({ content: `✅ ${label} key created and sent to <@${target.id}> via DM.\n\n🔑 Key: \`${newKey}\`\n⏰ Expires: ${expiry}`, ephemeral: true });
   } catch {
-    // DMs might be disabled
-    await interaction.reply({ content: `✅ Key created but couldn't DM <@${target.id}> (DMs disabled?).\n\n🔑 Key: \`${newKey}\`\n⏰ Expires: ${expiry}`, ephemeral: true });
+    await interaction.reply({ content: `✅ ${label} key created but couldn't DM <@${target.id}>.\n\n🔑 Key: \`${newKey}\`\n⏰ Expires: ${expiry}`, ephemeral: true });
   }
 }
 
-// ── Redeem Key Modal ──
+// ── Unwhitelist (delete key) ──
+async function handleUnwhitelist(interaction) {
+  if (!interaction.member.roles.cache.has(ADMIN_ROLE_ID))
+    return interaction.reply({ content: '❌ No permission.', ephemeral: true });
+
+  const target = interaction.options.getUser('user');
+  const keyType = interaction.options.getString('type');
+
+  const { data, error } = await supabase.from('keys')
+    .delete()
+    .eq('discord_user_id', target.id)
+    .eq('key_type', keyType)
+    .eq('is_active', true);
+
+  if (error) {
+    console.error('Unwhitelist error:', error);
+    return interaction.reply({ content: '❌ Failed to remove key.', ephemeral: true });
+  }
+
+  const label = keyType === 'private' ? 'Private' : 'Standard';
+  await interaction.reply({ content: `✅ All active ${label} keys for <@${target.id}> have been deleted.`, ephemeral: true });
+}
+
+// ── Redeem Key Modal (standard only) ──
 async function showRedeemModal(interaction) {
   const userId = interaction.user.id;
   const { data: banned } = await supabase.from('banned_users').select('id').eq('discord_user_id', userId).maybeSingle();
@@ -171,7 +218,7 @@ async function handleModalRedeem(interaction) {
   const keyInput = interaction.fields.getTextInputValue('key_input').trim();
 
   const { data: keyData } = await supabase.from('keys')
-    .select('*').eq('key', keyInput).eq('is_active', true).maybeSingle();
+    .select('*').eq('key', keyInput).eq('is_active', true).eq('key_type', 'standard').maybeSingle();
 
   if (!keyData) return interaction.reply({ content: '❌ Invalid or expired key.', ephemeral: true });
   if (!keyData.lootlabs_completed) return interaction.reply({ content: '❌ Key not activated yet. Complete all 3 steps first.', ephemeral: true });
@@ -183,21 +230,23 @@ async function handleModalRedeem(interaction) {
   await interaction.reply({ content: `✅ Key redeemed!\n\n🔑 Key: \`${keyData.key}\`\n⏰ Expires: ${expiry}`, ephemeral: true });
 }
 
-// ── Get Script ──
-async function handleGetScript(interaction) {
+// ── Get Script (supports both types) ──
+async function handleGetScript(interaction, keyType) {
   const userId = interaction.user.id;
   const { data: banned } = await supabase.from('banned_users').select('id').eq('discord_user_id', userId).maybeSingle();
   if (banned) return interaction.reply({ content: '❌ You are banned.', ephemeral: true });
 
   const { data: keys } = await supabase.from('keys')
     .select('*').eq('discord_user_id', userId).eq('is_active', true).eq('lootlabs_completed', true)
+    .eq('key_type', keyType)
     .order('created_at', { ascending: false }).limit(1);
 
-  if (!keys?.length) return interaction.reply({ content: '❌ No active key found. Redeem a key first.', ephemeral: true });
+  if (!keys?.length) return interaction.reply({ content: '❌ No active key found.', ephemeral: true });
   const k = keys[0];
   if (k.expires_at && new Date(k.expires_at) < new Date()) return interaction.reply({ content: '❌ Your key has expired.', ephemeral: true });
 
-  const scriptUrl = `https://ciybdtgrarvjkpphuqbn.supabase.co/functions/v1/cl`;
+  const scriptFn = keyType === 'private' ? 'cl-private' : 'cl';
+  const scriptUrl = `https://ciybdtgrarvjkpphuqbn.supabase.co/functions/v1/${scriptFn}`;
   await interaction.reply({ content: `📜 Here is your script:\n\`\`\`lua\nscript_key="${k.key}";\nloadstring(game:HttpGet("${scriptUrl}"))()\n\`\`\``, ephemeral: true });
 }
 
@@ -211,32 +260,33 @@ async function handleGetRole(interaction) {
   }
 }
 
-// ── Reset HWID ──
-async function handleResetHwid(interaction) {
+// ── Reset HWID (supports both types) ──
+async function handleResetHwid(interaction, keyType) {
   const userId = interaction.user.id;
   const { data: keys } = await supabase.from('keys')
-    .select('*').eq('discord_user_id', userId).eq('is_active', true)
+    .select('*').eq('discord_user_id', userId).eq('is_active', true).eq('key_type', keyType)
     .order('created_at', { ascending: false }).limit(1);
 
-  if (!keys?.length) return interaction.reply({ content: '❌ No key found. Redeem a key first.', ephemeral: true });
+  if (!keys?.length) return interaction.reply({ content: '❌ No key found.', ephemeral: true });
   await supabase.from('keys').update({ hwid: null }).eq('id', keys[0].id);
   await interaction.reply({ content: '✅ HWID reset. It will be re-assigned on next execution.', ephemeral: true });
 }
 
-// ── Get Stats ──
-async function handleGetStats(interaction) {
+// ── Get Stats (supports both types) ──
+async function handleGetStats(interaction, keyType) {
   const userId = interaction.user.id;
   const { data: keys } = await supabase.from('keys')
-    .select('*').eq('discord_user_id', userId).eq('is_active', true)
+    .select('*').eq('discord_user_id', userId).eq('is_active', true).eq('key_type', keyType)
     .order('created_at', { ascending: false }).limit(1);
 
-  if (!keys?.length) return interaction.reply({ content: '❌ No key found. Redeem a key first.', ephemeral: true });
+  if (!keys?.length) return interaction.reply({ content: '❌ No key found.', ephemeral: true });
   const k = keys[0];
   const { data: banned } = await supabase.from('banned_users').select('id').eq('discord_user_id', userId).maybeSingle();
 
   const expiry = k.expires_at ? `<t:${Math.floor(new Date(k.expires_at).getTime() / 1000)}:R>` : 'Never';
+  const label = keyType === 'private' ? '🔒 Private' : '⚔ Standard';
   await interaction.reply({
-    content: `📊 **Stats**\n\n**HWID:** ${k.hwid ? 'Assigned ✅' : 'Not set ⚠️'}\n**Key:** ||${k.key}||\n**Expires:** ${expiry}\n**Banned:** ${banned ? 'Yes ⛔' : 'No ✅'}\n**Roblox:** ${k.roblox_username || 'Unknown'}`,
+    content: `📊 **${label} Stats**\n\n**HWID:** ${k.hwid ? 'Assigned ✅' : 'Not set ⚠️'}\n**Key:** ||${k.key}||\n**Expires:** ${expiry}\n**Banned:** ${banned ? 'Yes ⛔' : 'No ✅'}\n**Roblox:** ${k.roblox_username || 'Unknown'}`,
     ephemeral: true
   });
 }
